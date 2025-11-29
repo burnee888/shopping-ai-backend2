@@ -19,13 +19,16 @@ function addEbayAffiliate(rawUrl: string) {
   const campid = process.env.EPN_CAMPAIGN_ID;
   const customId = process.env.EPN_CUSTOM_ID;
 
-  if (!campid) return rawUrl; // simple safety
+  if (!campid || !rawUrl) return rawUrl;
 
   const separator = rawUrl.includes("?") ? "&" : "?";
-  return `${rawUrl}${separator}campid=${campid}&customid=${customId}&mkcid=1&mkrid=711-53200-19255-0`;
+  // mkcid / mkrid are typical tracking params; adjust if needed
+  return `${rawUrl}${separator}campid=${campid}${
+    customId ? `&customid=${customId}` : ""
+  }&mkcid=1&mkrid=711-53200-19255-0`;
 }
 
-// ---------- OpenAI client ----------
+// ---------- OpenAI client (for future use) ----------
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -36,6 +39,8 @@ const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
+
+// Root route
 app.get("/", (req, res) => {
   res.send("Shopping AI Backend is running!");
 });
@@ -77,6 +82,7 @@ app.get("/api/search/amazon", async (req, res) => {
 
     return res.json({
       success: true,
+      source: "amazon",
       query,
       data: response.data,
     });
@@ -210,6 +216,74 @@ app.get("/api/search", async (req, res) => {
   } catch (err: any) {
     console.error("Combined /api/search error:", err.message || err);
     return res.status(500).json({ error: "Combined search failed" });
+  }
+});
+
+// ==========================
+// 5. eBay search
+// ==========================
+app.get("/api/search/ebay", async (req, res) => {
+  // support both ?query=iphone and ?q=iphone
+  const query =
+    (req.query.query as string) || (req.query.q as string);
+
+  if (!query) {
+    return res
+      .status(400)
+      .json({ error: "Missing query (use ?query= or ?q=)" });
+  }
+
+  const ebayToken = process.env.EBAY_OAUTH_TOKEN;
+  if (!ebayToken) {
+    return res
+      .status(500)
+      .json({ error: "EBAY_OAUTH_TOKEN missing in .env" });
+  }
+
+  try {
+    const url = "https://api.ebay.com/buy/browse/v1/item_summary/search";
+
+    const response = await axios.get(url, {
+      params: {
+        q: query,
+        limit: 20,
+      },
+      headers: {
+        Authorization: `Bearer ${ebayToken}`,
+        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
+        "Content-Type": "application/json",
+      },
+    });
+
+    const items = (response.data.itemSummaries || []) as any[];
+
+    const products = items.map((item) => ({
+      id: item.itemId,
+      title: item.title,
+      price: item.price ? Number(item.price.value) : null,
+      currency: item.price ? item.price.currency : null,
+      image: item.image?.imageUrl ?? null,
+      url: addEbayAffiliate(item.itemWebUrl ?? ""),
+      condition: item.condition ?? null,
+      seller: item.seller?.username ?? null,
+    }));
+
+    return res.json({
+      source: "ebay",
+      query,
+      total: products.length,
+      products,
+    });
+  } catch (err: any) {
+    console.error(
+      "eBay API error:",
+      err.response?.data || err.message || err
+    );
+    const status = err.response?.status || 500;
+    return res.status(status).json({
+      error: "eBay search failed",
+      details: err.response?.data || err.message,
+    });
   }
 });
 
